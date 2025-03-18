@@ -1,12 +1,9 @@
-
-#define _GNU_SOURCE
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <sqlite3.h>
 #include <string.h>
-
 #include <unistd.h>
 
 #define DB_FILENAME "data.db"
@@ -15,90 +12,138 @@
 
 #define SHIFT(argc, argv) (assert(argc), argc--, *argv++)
 
+
 sqlite3 *db;
 int rc;
+int contig_id = 1;
 
 char* get_sqlite_db_path();
+size_t parse_num(char* s);
 void parse_opts(int argc, char** argv);
 
 
+char* query_errmsg; // sqlite3_free
+char* query_sql_template; // do not free
+char* query_sql; // free
 
+void exit_sequence() {
+    if (query_errmsg) sqlite3_free(query_errmsg);
+    if (query_sql) free(query_sql);
+    exit(0);
+}
+
+
+// Caller should reset contig_id to 0 once the sql query is done to maintain order
 int sql_callback_print(void * v, int ncol, char ** colVal, char ** colName) {
-    for (int i = 0 ; i < ncol ; i++) {
-           printf("%s : %s\n", colName[i], colVal[i] ? colVal[i] : "NULL");
+    printf("%d.", contig_id++);
+
+    int min_chars = 8;
+    for (int i = 1 ; i < ncol ; i++) {
+       printf("\t%*s : %s\n", min_chars, colName[i], colVal[i] ? colVal[i] : "NULL");
     }
     printf("\n");
     return 0;
 }
 
-void sql_create_main_table_if_not_exists() {
+int sql_create_main_table_if_not_exists() {
     // create table if not exists TableName (col1 typ1, ..., colN typN)
-    char* errmsg;
-    const char *sql = "CREATE TABLE IF NOT EXISTS "MAIN_TABLE_NAME" ("
-                        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    query_sql_template = NULL;
+    query_sql = "CREATE TABLE IF NOT EXISTS "MAIN_TABLE_NAME" ("
+                        "id INTEGER PRIMARY KEY, "
                         "name TEXT NOT NULL, "
                         "comment TEXT, "
                         "time INTEGER DEFAULT (strftime('%s', 'now')));";
+    rc = sqlite3_exec(db, query_sql, NULL, NULL, &query_errmsg);
 
-    rc = sqlite3_exec(db, sql, NULL, NULL, &errmsg);
-
-    if (rc != SQLITE_OK) {
-        printf("Sqlite: Error creating table: %s\n", errmsg);
-        sqlite3_free(errmsg);
-        sqlite3_close(db);
-        exit(0);
-    }
+    if (rc != SQLITE_OK) { return -1; }
+    return 0;
 }
 
-void recall_list() {
+int recall_list(size_t n) {
     printf("Recall!\n");
-    char* errmsg;
-    rc = sqlite3_exec(db, "select * from "MAIN_TABLE_NAME";", sql_callback_print, NULL, &errmsg);
 
-    if (rc != SQLITE_OK) {
-        printf("Sqlite Error: %s\n", errmsg);
-        sqlite3_free(errmsg);
-        sqlite3_close(db);
-        exit(0);
+    size_t size;
+    if (n == 0) {
+        query_sql_template = "SELECT * FROM "MAIN_TABLE_NAME";";
+        size = strlen(query_sql_template) + 1;
+        query_sql = malloc(size);
+    } else {
+         query_sql_template = "SELECT * FROM "MAIN_TABLE_NAME" ORDER BY id ASC LIMIT %d;";
+        size = snprintf(NULL, 0, query_sql_template, n) + 1; // Check : how much would it write ?
     }
+    query_sql = malloc(size);
+    snprintf(query_sql, size, query_sql_template, n);
+
+    rc = sqlite3_exec(db, query_sql, sql_callback_print, NULL, &query_errmsg);
+    contig_id = 1;
+
+
+    if (rc != SQLITE_OK) { return -1; }
+    return 0;
 }
 
-void recall_add(char* name, char* comment) {
-    // TODO: Timestamp + SQL Injection + Switch away from GNU Extension
+int recall_add(char* name, char* comment) {
     printf("Add!\n");
-    char* errmsg; // TODO: Factor this and others out
-    char* sql;
-    asprintf(&sql, "insert into "MAIN_TABLE_NAME" (name, comment) values ('%s', '%s');", name, comment);
-    rc = sqlite3_exec(db, sql, sql_callback_print, NULL, &errmsg);
+                  
+    query_sql_template = "INSERT INTO "MAIN_TABLE_NAME" (name, comment) VALUES ('%s', '%s');";
+                  
+    size_t size = snprintf(NULL, 0, query_sql_template, name, comment) + 1; // Check : how much would it write ?
+    query_sql = malloc(size);
+    snprintf(query_sql, size, query_sql_template, name, comment);
+                  
+    rc = sqlite3_exec(db, query_sql, NULL, NULL, &query_errmsg);
 
-    if (rc != SQLITE_OK) { // TODO: Factor this and others out
-        printf("Sqlite Error: %s\n", errmsg);
-        sqlite3_free(errmsg);
-        sqlite3_close(db);
-        exit(0);
+    if (rc != SQLITE_OK) { 
+        return -1;
     }
-
+    return 0;
 }
-void recall_remove() {
+
+int recall_remove(size_t idx) {
     printf("Remove!\n");
 
-}
-void recall_update() {
-    printf("Update!\n");
-}
-void recall_clear() {
-    printf("Clear\n");
+    if (idx == 0) idx = 1;
 
-    char* errmsg;
-    char* sql = "delete from "MAIN_TABLE_NAME"; delete from sqlite_sequence where name = '"MAIN_TABLE_NAME"';";
-    rc = sqlite3_exec(db, sql, sql_callback_print, NULL, &errmsg);
+    query_sql_template = "DELETE FROM "MAIN_TABLE_NAME" WHERE id = (SELECT id FROM "MAIN_TABLE_NAME" ORDER BY id ASC LIMIT 1 OFFSET %d);";
+;
+    size_t size = snprintf(NULL, 0, query_sql_template, idx-1);
+    query_sql   = malloc(size);
+    snprintf(query_sql, size, query_sql_template, idx-1);
+
+    rc = sqlite3_exec(db, query_sql, NULL , NULL, &query_errmsg);
+    if (rc != SQLITE_OK){
+        return -1;
+    }
+    return 0;
+}
+int recall_update(size_t idx, char* name, char* comment) {
+    printf("Update!\n");
+    if (idx == 0) idx = 1;
+
+    query_sql_template = "UPDATE "MAIN_TABLE_NAME" SET name = '%s', comment = '%s'"
+        "WHERE id = (SELECT id FROM "MAIN_TABLE_NAME" ORDER BY id ASC LIMIT 1 OFFSET %d);";
+    size_t size = snprintf(NULL, 0, query_sql_template, name, comment, idx-1);
+    query_sql   = malloc(size);
+    snprintf(query_sql, size, query_sql_template, name, comment, idx-1);
+
+    rc = sqlite3_exec(db, query_sql, NULL , NULL, &query_errmsg);
+    if (rc != SQLITE_OK){
+        return -1;
+    }
+    return 0;
+}
+
+int recall_clear() {
+    printf("Clear!\n");
+
+    query_sql_template = NULL;
+    query_sql = "DELETE FROM "MAIN_TABLE_NAME"; DELETE FROM sqlite_sequence WHERE name = '"MAIN_TABLE_NAME"';";
+    rc = sqlite3_exec(db, query_sql, NULL, NULL, &query_errmsg);
 
     if (rc != SQLITE_OK) {
-        printf("Sqlite Error: %s\n", errmsg);
-        sqlite3_free(errmsg);
-        sqlite3_close(db);
-        exit(0);
+        return -1;
     }
+    return 0;
 }
 
 
@@ -132,7 +177,7 @@ void parse_opts(int argc, char** argv) {
         char* opt = SHIFT(argc, argv); 
 
         if(opt[0] == '-' && collectingFlags) { // Collect flag
-            if (strlen(opt) == 1) exit(-1); // Invalid Flag : "-\0"
+            if (strlen(opt) == 1) exit(-1); // Invalid Flag : Single "-"
                                      
             switch(opt[1]) {
                 case 'd': 
@@ -146,24 +191,65 @@ void parse_opts(int argc, char** argv) {
             collectingFlags = 0; // Dont't accept flags any more 
             if (opt[0] == '-') {printf("Invalid Syntax\n"); exit(-1);} // flags come first
              
+
+            // Actions
+
+            int ret = 1;
             if (strcmp(opt, "list") == 0) {
-                recall_list();
+                size_t n = 0;
+                if (argc >= 1) {
+                    n = parse_num(SHIFT(argc, argv));
+                }
+                ret = recall_list(n); 
+
             } else if (strcmp(opt, "add") == 0) {
-                char* name = SHIFT(argc, argv); 
-                char* comment = SHIFT(argc, argv); 
-                recall_add(name, comment);
-                
+                if (argc >= 2) {
+                    char* name = SHIFT(argc, argv); 
+                    char* comment = SHIFT(argc, argv); 
+                    ret = recall_add(name, comment);
+                } else {
+                    printf("Please provide a name and comment\n");
+                }
             } else if (strcmp(opt, "remove") == 0) {
-                recall_remove();
+                size_t n = 0;
+                if (argc >= 1) {
+                    n = parse_num(SHIFT(argc, argv));
+                }
+                ret = recall_remove(n);
             } else if (strcmp(opt, "update") == 0) {
-                recall_update();
+                if (argc >= 3) {
+                    size_t idx = parse_num(SHIFT(argc, argv));
+                    char* name = SHIFT(argc, argv); 
+                    char* comment = SHIFT(argc, argv); 
+                    ret = recall_update(idx, name, comment);
+                } else {
+                    printf("Please provide a name, comment and index\n");
+                }
             } else if (strcmp(opt, "clear") == 0){
-                recall_clear();
+                ret = recall_clear();
             } else {
                printf("Invalid Keyword %s", opt);
+            } 
+
+            if (ret == -1) {
+                printf("An action failed!\n");
+                printf("Database Error: %s\n", query_errmsg);
+                exit_sequence();
             }
+
             // We still continue, now only collecting keywords
         }
+    }
+}
+
+// Returns 0 if s is NaN
+size_t parse_num(char* s) {
+    char* s_p;
+    long num = strtol(s, &s_p, 10);
+    if (*s_p == '\0') {
+        return num;
+    } else {
+        return 0;
     }
 }
 
