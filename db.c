@@ -9,10 +9,109 @@ sqlite3 *db;
 int rc;
 int contig_id = 1;
 
-char* query_errmsg = NULL; // sqlite3_free
-char* query_sql_template = NULL; // do not free
-char* query_sql = NULL; // free
+char* format;
+static int execute_sqlf(
+        int (*callback)(void*,int,char**,char**), 
+        void *data,
+        const char* format, ...);
 
+static int db_callback_print(void * v, int ncol, char ** colVal, char ** colName);
+
+static int db_create_main_table_if_not_exists() {
+    return execute_sqlf(NULL, NULL, "CREATE TABLE IF NOT EXISTS "MAIN_TABLE_NAME" ("
+                        "id INTEGER PRIMARY KEY, "
+                        "name TEXT NOT NULL, "
+                        "comment TEXT, "
+                        "time INTEGER DEFAULT (strftime('%s', 'now')));");
+}
+
+int recall_list(size_t n) {
+    printf("Listing...\n");
+
+    if (n == 0) {
+        rc = execute_sqlf(db_callback_print, NULL,"SELECT * FROM "MAIN_TABLE_NAME";");
+    } else {
+        rc = execute_sqlf(db_callback_print, NULL, "SELECT * FROM "MAIN_TABLE_NAME" ORDER BY id ASC LIMIT %d;", n);
+    }
+    contig_id = 0;
+
+    if (rc != SQLITE_OK) recall_log("[ERROR] sql error: %s\n", sqlite3_errmsg(db));
+    return rc;
+}
+
+int recall_add(char* name, char* comment) {
+    printf("Adding...\n");
+    format = "INSERT INTO "MAIN_TABLE_NAME" (name, comment) VALUES ('%s', '%s');";
+    rc = execute_sqlf(NULL, NULL, format, name, comment); 
+
+    if (rc != SQLITE_OK) recall_log("[ERROR] sql error: %s\n", sqlite3_errmsg(db));
+    return rc;
+}
+
+int recall_remove(size_t idx) {
+    printf("Removing...\n");
+    if (idx == 0) idx = 1;
+    format = "DELETE FROM "MAIN_TABLE_NAME" WHERE id = (SELECT id FROM "MAIN_TABLE_NAME" ORDER BY id ASC LIMIT 1 OFFSET %d);";
+    rc = execute_sqlf(NULL, NULL, format, idx-1);
+
+    if (rc != SQLITE_OK) recall_log("[ERROR] sql error: %s\n", sqlite3_errmsg(db));
+    return rc;
+}
+
+int recall_update(size_t idx, char* name, char* comment) {
+    printf("Updating...\n");
+    if (idx == 0) idx = 1;
+    format = "UPDATE "MAIN_TABLE_NAME" SET name = '%s', comment = '%s'"
+        "WHERE id = (SELECT id FROM "MAIN_TABLE_NAME" ORDER BY id ASC LIMIT 1 OFFSET %d);";
+    rc = execute_sqlf(NULL, NULL, format, name, comment, idx-1);
+
+    if (rc != SQLITE_OK) recall_log("[ERROR] sql error: %s\n", sqlite3_errmsg(db));
+    return rc;
+}
+
+int recall_clear() {
+    printf("Clearing...\n");
+    rc = execute_sqlf(NULL, NULL, "DELETE FROM "MAIN_TABLE_NAME";");
+
+    if (rc != SQLITE_OK) recall_log("[ERROR] sql error: %s\n", sqlite3_errmsg(db));
+    return rc;
+}
+
+int db_init(char* db_path) {
+    if (sqlite3_open(db_path, &db) != SQLITE_OK) { printf("Could not open database connection: %s\n", sqlite3_errmsg(db)); sqlite3_close(db); return -1; }
+    db_create_main_table_if_not_exists();
+    return 0;
+}
+
+void db_close() {
+    sqlite3_close(db);
+}
+
+static int execute_sqlf(
+        int (*callback)(void*,int,char**,char**), 
+        void *data,
+        const char* format, ...) {
+
+    va_list args_1;
+    va_start(args_1, format);
+
+    va_list args_2;
+    va_copy(args_2, args_1);
+
+    size_t size = vsnprintf(NULL, 0, format, args_2) + 1; 
+    va_end(args_2);
+
+    char* query_sql = malloc(size);
+    vsnprintf(query_sql, size, format, args_1);
+    va_end(args_1);
+
+    recall_log("[INFO] Running sql, `%s`\n", query_sql);
+    rc = sqlite3_exec(db, query_sql, callback, data, NULL);
+
+    free(query_sql);
+
+    return rc;
+}
 
 // Caller should reset contig_id to 0 once the sql query is done to maintain order
 static int db_callback_print(void * v, int ncol, char ** colVal, char ** colName) {
@@ -24,123 +123,4 @@ static int db_callback_print(void * v, int ncol, char ** colVal, char ** colName
     }
     printf("\n");
     return 0;
-}
-
-static int db_create_main_table_if_not_exists() {
-    // create table if not exists TableName (col1 typ1, ..., colN typN)
-    query_sql_template = NULL;
-    query_sql = strdup("CREATE TABLE IF NOT EXISTS "MAIN_TABLE_NAME" ("
-                        "id INTEGER PRIMARY KEY, "
-                        "name TEXT NOT NULL, "
-                        "comment TEXT, "
-                        "time INTEGER DEFAULT (strftime('%s', 'now')));");
-    rc = sqlite3_exec(db, query_sql, NULL, NULL, &query_errmsg);
-
-    if (rc != SQLITE_OK) { return -1; }
-    return 0;
-}
-
-int recall_list(size_t n) {
-    printf("Recall!\n");
-
-    size_t size;
-    if (n == 0) {
-        query_sql_template = "SELECT * FROM "MAIN_TABLE_NAME";";
-        size = strlen(query_sql_template) + 1;
-        query_sql = malloc(size);
-    } else {
-         query_sql_template = "SELECT * FROM "MAIN_TABLE_NAME" ORDER BY id ASC LIMIT %d;";
-        size = snprintf(NULL, 0, query_sql_template, n) + 1; // Check : how much would it write ?
-    }
-    query_sql = malloc(size);
-    snprintf(query_sql, size, query_sql_template, n);
-
-    rc = sqlite3_exec(db, query_sql, db_callback_print, NULL, &query_errmsg);
-    contig_id = 1;
-
-
-    if (rc != SQLITE_OK) { return -1; }
-    return 0;
-}
-
-int recall_add(char* name, char* comment) {
-    printf("Add!\n");
-                  
-    query_sql_template = "INSERT INTO "MAIN_TABLE_NAME" (name, comment) VALUES ('%s', '%s');";
-                  
-    size_t size = snprintf(NULL, 0, query_sql_template, name, comment) + 1; // Check : how much would it write ?
-    query_sql = malloc(size);
-    snprintf(query_sql, size, query_sql_template, name, comment);
-                  
-    rc = sqlite3_exec(db, query_sql, NULL, NULL, &query_errmsg);
-
-    if (rc != SQLITE_OK) { 
-        return -1;
-    }
-    return 0;
-}
-
-int recall_remove(size_t idx) {
-    printf("Remove!\n");
-
-    if (idx == 0) idx = 1;
-
-    query_sql_template = "DELETE FROM "MAIN_TABLE_NAME" WHERE id = (SELECT id FROM "MAIN_TABLE_NAME" ORDER BY id ASC LIMIT 1 OFFSET %d);";
-;
-    size_t size = snprintf(NULL, 0, query_sql_template, idx-1);
-    query_sql   = malloc(size);
-    snprintf(query_sql, size, query_sql_template, idx-1);
-
-    rc = sqlite3_exec(db, query_sql, NULL , NULL, &query_errmsg);
-    if (rc != SQLITE_OK){
-        return -1;
-    }
-    return 0;
-}
-int recall_update(size_t idx, char* name, char* comment) {
-    printf("Update!\n");
-    if (idx == 0) idx = 1;
-
-    query_sql_template = "UPDATE "MAIN_TABLE_NAME" SET name = '%s', comment = '%s'"
-        "WHERE id = (SELECT id FROM "MAIN_TABLE_NAME" ORDER BY id ASC LIMIT 1 OFFSET %d);";
-    size_t size = snprintf(NULL, 0, query_sql_template, name, comment, idx-1);
-    query_sql   = malloc(size);
-    snprintf(query_sql, size, query_sql_template, name, comment, idx-1);
-
-    rc = sqlite3_exec(db, query_sql, NULL , NULL, &query_errmsg);
-    if (rc != SQLITE_OK){
-        return -1;
-    }
-    return 0;
-}
-
-int recall_clear() {
-    printf("Clear!\n");
-
-    query_sql_template = NULL;
-    query_sql = strdup("DELETE FROM "MAIN_TABLE_NAME";");
-    rc = sqlite3_exec(db, query_sql, NULL, NULL, &query_errmsg);
-
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "SQL error: %s\n", query_errmsg);
-        return -1;
-    }
-    return 0;
-}
-
-int db_init(char* db_path) {
-    if (sqlite3_open(db_path, &db) != SQLITE_OK) { printf("Could not open database connection: %s\n", sqlite3_errmsg(db)); sqlite3_close(db); return -1; }
-    db_create_main_table_if_not_exists();
-    return 0;
-}
-
-void db_cleanup() {
-    if (query_errmsg) sqlite3_free(query_errmsg);
-    if (query_sql) free(query_sql);
-    query_errmsg = NULL;
-    query_sql = NULL;
-}
-
-void db_close() {
-    sqlite3_close(db);
 }

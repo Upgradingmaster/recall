@@ -7,50 +7,59 @@
 #include "defines.h"
 #include "db.h"
 
-static void mk_data_dir_if_not_exist();
-static void parse_opts(int argc, char** argv);
-static size_t parse_num(char* s);
+static void build_paths();
+static void mk_files_if_not_exist();
 
-char* data_dir_path;
+static void parse_cmd(int argc, char** argv);
+
+char* app_path;
 char* db_path;
 
+int debug = 0;
+
 int main(int argc, char** argv) {
-    mk_data_dir_if_not_exist();
+    build_paths();
+    mk_files_if_not_exist();
 
     db_init(db_path);
-    parse_opts(argc, argv);
+    parse_cmd(argc, argv);
     db_close();
 
     free(db_path);
-    free(data_dir_path);
+    free(app_path);
     return 0;
 }
 
-static void mk_data_dir_if_not_exist() {
+static void build_paths() {
+
     const char *xdg_data_home = getenv("XDG_DATA_HOME");
-    assert(xdg_data_home);
+    if (!xdg_data_home) {
+        printf("XDG_DATA_HOME environment variable not set.\n");
+        exit(1);
+    }
 
-    // Create the app directory
-    int n_dir = strlen(xdg_data_home) + strlen(APP_NAME) + 3;
-    data_dir_path = malloc(n_dir);
-    snprintf(data_dir_path, n_dir, "%s/%s/", xdg_data_home, APP_NAME);
+    int app_n = strlen(xdg_data_home) + strlen(APP_NAME) + 3;
+    app_path = malloc(app_n);
+    snprintf(app_path, app_n, "%s/%s/", xdg_data_home, APP_NAME);
 
+    int db_n = strlen(app_path) + sizeof(DB_FILE_NAME) + 1;
+    db_path = malloc(db_n);
+    snprintf(db_path, db_n, "%s%s", app_path, DB_FILE_NAME);
+
+}
+static void mk_files_if_not_exist() {
     struct stat st = {0};
-    if (stat(data_dir_path, &st) == -1) {
-        if (mkdir(data_dir_path, 0700) == -1) {
+    if (stat(app_path, &st) == -1) {
+        if (mkdir(app_path, 0700) == -1) {
             perror("Failed to create app directory");
             exit(1);
         }
     }
 
-    int n = strlen(data_dir_path) + sizeof("data.db") + 1;
-    db_path = malloc(n);
-    snprintf(db_path, n, "%s%s", data_dir_path, "data.db");
-    // Creation handled by sqlite3
-
+    // creation of db is handled by sqlite
 }
 
-static void parse_opts(int argc, char** argv) {
+static void parse_cmd(int argc, char** argv) {
     char* name = SHIFT(argc, argv);
     int   collecting_flags = 1;
 
@@ -58,15 +67,13 @@ static void parse_opts(int argc, char** argv) {
         char* opt = SHIFT(argc, argv); 
 
         if(opt[0] == '-' && collecting_flags) { // Collect flags first
-            if (strlen(opt) == 1) exit(-1); // Invalid Flag : Single "-"
-                                     
-            // TODO: debug global variable
             switch(opt[1]) {
                 case 'd': 
-                    printf("Flag: Debug\n");
+                    recall_log("[INFO] Debug Mode Enabled.\n");
+                    debug = 1;
                     break;
                 default: 
-                    printf("Invalid Flag: %s\n", opt);
+                    recall_log("[ERROR] Invalid Flag: `%s`. Ignoring... \n", opt);
                     break;
             }
         } else { // Colect Keyword
@@ -78,7 +85,7 @@ static void parse_opts(int argc, char** argv) {
             if (strcmp(opt, "list") == 0) {
                 size_t n = 0;
                 if (argc >= 1) {
-                    n = parse_num(SHIFT(argc, argv));
+                    n = atoi(SHIFT(argc, argv));
                 }
                 ret = recall_list(n); 
 
@@ -94,12 +101,12 @@ static void parse_opts(int argc, char** argv) {
             } else if (strcmp(opt, "remove") == 0) {
                 size_t n = 0;
                 if (argc >= 1) {
-                    n = parse_num(SHIFT(argc, argv));
+                    n = atoi(SHIFT(argc, argv));
                 }
                 ret = recall_remove(n);
             } else if (strcmp(opt, "update") == 0) {
                 if (argc >= 3) {
-                    size_t idx = parse_num(SHIFT(argc, argv));
+                    size_t idx = atoi(SHIFT(argc, argv));
                     char* name = SHIFT(argc, argv); 
                     char* comment = SHIFT(argc, argv); 
                     ret = recall_update(idx, name, comment);
@@ -114,26 +121,15 @@ static void parse_opts(int argc, char** argv) {
                ret = -1;
             } 
 
-            db_cleanup();
-
-            if (ret == -1) {
+            if (ret == 0) {
+                printf("Done.\n");
+            } else {
                 printf("An action failed!\n");
                 break;
             }
 
             // continue;
         }
-    }
-}
-
-// Returns 0 if s is NaN
-static size_t parse_num(char* s) {
-    char* s_p;
-    long num = strtol(s, &s_p, 10);
-    if (*s_p == '\0') {
-        return num;
-    } else {
-        return 0;
     }
 }
 

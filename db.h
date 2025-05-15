@@ -10,7 +10,6 @@ int recall_add(char* name, char* comment);
 int recall_list(size_t n);
 
 int db_init(char* db_path);
-void db_cleanup();
 void db_close();
 
 #endif // RECALL_DB

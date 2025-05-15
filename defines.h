@@ -1,6 +1,8 @@
 #ifndef RECALL_DEFINES
 #define RECALL_DEFINES
 
+extern int debug;
+
 #define APP_NAME "recall"
 #define DB_FILE_NAME "data.db"
 #define MAIN_TABLE_NAME "main"
